@@ -137,6 +137,8 @@ DEBUG: end   cg::initialize
 DEBUG: begin advanced_apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin advanced_apply(<typename>)
 DEBUG: begin csr::advanced_spmv
 DEBUG: end   csr::advanced_spmv
@@ -177,6 +179,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -217,6 +221,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -257,6 +263,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -297,6 +305,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -337,6 +347,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -377,6 +389,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -417,6 +431,8 @@ DEBUG: end   cg::step_1
 DEBUG: begin apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin apply(<typename>)
 DEBUG: begin csr::spmv
 DEBUG: end   csr::spmv
@@ -785,6 +801,8 @@ DEBUG: end   copy(<typename>)
 DEBUG: begin advanced_apply(<typename>)
 DEBUG: begin dense::row_gather
 DEBUG: end   dense::row_gather
+DEBUG: begin event::record_event
+DEBUG: end   event::record_event
 DEBUG: begin advanced_apply(<typename>)
 DEBUG: begin csr::advanced_spmv
 DEBUG: end   csr::advanced_spmv
