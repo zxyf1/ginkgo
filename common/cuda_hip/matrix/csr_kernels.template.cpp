@@ -164,6 +164,91 @@ __device__ __forceinline__ void warp_atomic_add(
 }
 
 
+// Helper function for vectorized loading using 128-bit (int4) reads
+template <typename ValueType, typename IndexType>
+__device__ __forceinline__ void vectorized_load_128bit(
+    const ValueType* __restrict__ val_ptr,
+    const IndexType* __restrict__ col_idx_ptr,
+    const IndexType base_ind,
+    const IndexType data_size,
+    ValueType* local_vals,
+    IndexType* local_cols,
+    int num_elements)
+{
+    // Use 128-bit vectorized load when alignment allows
+    constexpr int vec_size = sizeof(int4) / sizeof(int);
+
+    if (base_ind + num_elements <= data_size) {
+        // Check if we can do aligned 128-bit loads
+        if (sizeof(ValueType) == sizeof(float) && num_elements >= 4) {
+            // For float types, use float4
+            if (reinterpret_cast<uintptr_t>(val_ptr + base_ind) % sizeof(float4) == 0) {
+                const float4* vec_val_ptr = reinterpret_cast<const float4*>(val_ptr + base_ind);
+                float4 vec_val = *vec_val_ptr;
+                local_vals[0] = reinterpret_cast<ValueType*>(&vec_val)[0];
+                local_vals[1] = reinterpret_cast<ValueType*>(&vec_val)[1];
+                local_vals[2] = reinterpret_cast<ValueType*>(&vec_val)[2];
+                local_vals[3] = reinterpret_cast<ValueType*>(&vec_val)[3];
+            } else {
+                // Fallback to scalar loads
+                #pragma unroll
+                for (int i = 0; i < num_elements; i++) {
+                    local_vals[i] = val_ptr[base_ind + i];
+                }
+            }
+        } else if (sizeof(ValueType) == sizeof(double) && num_elements >= 2) {
+            // For double types, use double2 for 128-bit loads
+            if (reinterpret_cast<uintptr_t>(val_ptr + base_ind) % sizeof(double2) == 0) {
+                const double2* vec_val_ptr = reinterpret_cast<const double2*>(val_ptr + base_ind);
+                double2 vec_val = *vec_val_ptr;
+                local_vals[0] = reinterpret_cast<ValueType*>(&vec_val)[0];
+                local_vals[1] = reinterpret_cast<ValueType*>(&vec_val)[1];
+            } else {
+                #pragma unroll
+                for (int i = 0; i < num_elements; i++) {
+                    local_vals[i] = val_ptr[base_ind + i];
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < num_elements; i++) {
+                local_vals[i] = val_ptr[base_ind + i];
+            }
+        }
+
+        // Load column indices using int4 for 128-bit reads
+        if (sizeof(IndexType) == sizeof(int) && num_elements >= 4) {
+            if (reinterpret_cast<uintptr_t>(col_idx_ptr + base_ind) % sizeof(int4) == 0) {
+                const int4* vec_col_ptr = reinterpret_cast<const int4*>(col_idx_ptr + base_ind);
+                int4 vec_col = *vec_col_ptr;
+                local_cols[0] = reinterpret_cast<IndexType*>(&vec_col)[0];
+                local_cols[1] = reinterpret_cast<IndexType*>(&vec_col)[1];
+                local_cols[2] = reinterpret_cast<IndexType*>(&vec_col)[2];
+                local_cols[3] = reinterpret_cast<IndexType*>(&vec_col)[3];
+            } else {
+                #pragma unroll
+                for (int i = 0; i < num_elements; i++) {
+                    local_cols[i] = col_idx_ptr[base_ind + i];
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < num_elements; i++) {
+                local_cols[i] = col_idx_ptr[base_ind + i];
+            }
+        }
+    } else {
+        // Handle boundary case
+        #pragma unroll
+        for (int i = 0; i < num_elements; i++) {
+            if (base_ind + i < data_size) {
+                local_vals[i] = val_ptr[base_ind + i];
+                local_cols[i] = col_idx_ptr[base_ind + i];
+            }
+        }
+    }
+}
+
 template <bool last, unsigned subwarp_size, typename arithmetic_type,
           typename matrix_accessor, typename IndexType, typename input_accessor,
           typename output_accessor, typename Closure>
@@ -188,8 +273,68 @@ __device__ __forceinline__ void process_window(
     }
 
     if (!last || ind < data_size) {
-        const auto col = col_idxs[ind];
-        temp_val += val(ind) * b(col, column_id);
+        // Optimized 128-bit vectorized load for column indices and values
+        // Each group of 4 threads uses a single 128-bit load and extracts their element
+        using value_type = typename matrix_accessor::storage_type;
+        constexpr int vec_width = 4;  // 128-bit = 4 * 32-bit elements
+
+        if constexpr (sizeof(value_type) == sizeof(float) ||
+                      sizeof(value_type) == sizeof(int)) {
+            // Calculate aligned base index for 128-bit loads
+            const IndexType base_ind = (ind / vec_width) * vec_width;
+            const int lane_in_vec = ind % vec_width;
+
+            // Check if we can safely do a vectorized load
+            const bool can_vectorize = (base_ind + vec_width <= data_size);
+
+            if (can_vectorize) {
+                // Use 128-bit vectorized loads (int4 for indices, float4/int4 for values)
+                const auto* val_ptr = val.get_accessor().get_stored_data();
+
+                if constexpr (sizeof(value_type) == sizeof(float)) {
+                    // Load 4 floats at once using float4 (128-bit)
+                    const float4 vals = *reinterpret_cast<const float4*>(val_ptr + base_ind);
+                    const int4 cols = *reinterpret_cast<const int4*>(col_idxs + base_ind);
+
+                    // Extract the element for this thread
+                    value_type my_val;
+                    IndexType my_col;
+
+                    switch(lane_in_vec) {
+                        case 0: my_val = vals.x; my_col = cols.x; break;
+                        case 1: my_val = vals.y; my_col = cols.y; break;
+                        case 2: my_val = vals.z; my_col = cols.z; break;
+                        case 3: my_val = vals.w; my_col = cols.w; break;
+                    }
+
+                    temp_val += my_val * b(my_col, column_id);
+                } else {
+                    // For int types
+                    const int4 vals = *reinterpret_cast<const int4*>(val_ptr + base_ind);
+                    const int4 cols = *reinterpret_cast<const int4*>(col_idxs + base_ind);
+
+                    value_type my_val;
+                    IndexType my_col;
+
+                    switch(lane_in_vec) {
+                        case 0: my_val = vals.x; my_col = cols.x; break;
+                        case 1: my_val = vals.y; my_col = cols.y; break;
+                        case 2: my_val = vals.z; my_col = cols.z; break;
+                        case 3: my_val = vals.w; my_col = cols.w; break;
+                    }
+
+                    temp_val += my_val * b(my_col, column_id);
+                }
+            } else {
+                // Boundary case: use regular scalar load
+                const auto col = col_idxs[ind];
+                temp_val += val(ind) * b(col, column_id);
+            }
+        } else {
+            // For other types (double, etc.), use regular load
+            const auto col = col_idxs[ind];
+            temp_val += val(ind) * b(col, column_id);
+        }
     }
 }
 
