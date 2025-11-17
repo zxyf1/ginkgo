@@ -123,6 +123,47 @@ __device__ __forceinline__ bool block_segment_scan_reverse(
 }
 
 
+/**
+ * Helper structure to cache row_ptrs using 128-bit (int4) vectorized reads
+ * This reduces memory transactions when accessing row pointers
+ */
+template <typename IndexType>
+struct row_ptrs_cache {
+    IndexType data[4];
+    IndexType base_row;
+
+    __device__ __forceinline__ row_ptrs_cache() : base_row(-1) {}
+
+    __device__ __forceinline__ IndexType get(
+        const IndexType* __restrict__ row_ptr, IndexType row) {
+        // Check if we need to reload the cache
+        if (row < base_row || row >= base_row + 3) {
+            // Align to int4 boundary for optimal 128-bit read
+            IndexType aligned_row = (row / 4) * 4;
+            base_row = aligned_row;
+
+            // Use int4 for 128-bit vectorized read when IndexType is 32-bit
+            if constexpr (sizeof(IndexType) == 4) {
+                const int4* row_ptr_int4 =
+                    reinterpret_cast<const int4*>(row_ptr + aligned_row + 1);
+                int4 loaded = *row_ptr_int4;
+                data[0] = reinterpret_cast<const IndexType*>(&loaded)[0];
+                data[1] = reinterpret_cast<const IndexType*>(&loaded)[1];
+                data[2] = reinterpret_cast<const IndexType*>(&loaded)[2];
+                data[3] = reinterpret_cast<const IndexType*>(&loaded)[3];
+            } else {
+                // Fallback for non-32-bit index types
+                data[0] = row_ptr[aligned_row + 1];
+                data[1] = row_ptr[aligned_row + 2];
+                data[2] = row_ptr[aligned_row + 3];
+                data[3] = row_ptr[aligned_row + 4];
+            }
+        }
+        return data[row - base_row];
+    }
+};
+
+
 template <bool overflow, typename IndexType>
 __device__ __forceinline__ void find_next_row(
     const IndexType num_rows, const IndexType data_size, const IndexType ind,
@@ -135,6 +176,34 @@ __device__ __forceinline__ void find_next_row(
             row_end = row_predict_end;
             while (ind >= row_end) {
                 row_end = row_ptr[++row + 1];
+            }
+        }
+
+    } else {
+        row = num_rows - 1;
+        row_end = data_size;
+    }
+}
+
+
+/**
+ * Optimized version of find_next_row using 128-bit int4 reads
+ * for better memory access performance
+ */
+template <bool overflow, typename IndexType>
+__device__ __forceinline__ void find_next_row_opt(
+    const IndexType num_rows, const IndexType data_size, const IndexType ind,
+    IndexType& row, IndexType& row_end, const IndexType row_predict,
+    const IndexType row_predict_end, const IndexType* __restrict__ row_ptr,
+    row_ptrs_cache<IndexType>& cache)
+{
+    if (!overflow || ind < data_size) {
+        if (ind >= row_end) {
+            row = row_predict;
+            row_end = row_predict_end;
+            while (ind >= row_end) {
+                ++row;
+                row_end = cache.get(row_ptr, row);
             }
         }
 
@@ -246,6 +315,93 @@ __device__ __forceinline__ void spmv_kernel(
 }
 
 
+/**
+ * Optimized version of process_window using 128-bit int4 reads
+ */
+template <bool last, unsigned subwarp_size, typename arithmetic_type,
+          typename matrix_accessor, typename IndexType, typename input_accessor,
+          typename output_accessor, typename Closure>
+__device__ __forceinline__ void process_window_opt(
+    const group::thread_block_tile<subwarp_size>& group,
+    const IndexType num_rows, const IndexType data_size, const IndexType ind,
+    IndexType& row, IndexType& row_end, IndexType& nrow, IndexType& nrow_end,
+    arithmetic_type& temp_val, acc::range<matrix_accessor> val,
+    const IndexType* __restrict__ col_idxs,
+    const IndexType* __restrict__ row_ptrs, acc::range<input_accessor> b,
+    acc::range<output_accessor> c, const IndexType column_id, Closure scale,
+    row_ptrs_cache<IndexType>& cache)
+{
+    const auto curr_row = row;
+    find_next_row_opt<last>(num_rows, data_size, ind, row, row_end, nrow,
+                            nrow_end, row_ptrs, cache);
+    // segmented scan
+    if (group.any(curr_row != row)) {
+        warp_atomic_add(group, curr_row != row, temp_val, curr_row, c,
+                        column_id, scale);
+        nrow = group.shfl(row, subwarp_size - 1);
+        nrow_end = group.shfl(row_end, subwarp_size - 1);
+    }
+
+    if (!last || ind < data_size) {
+        const auto col = col_idxs[ind];
+        temp_val += val(ind) * b(col, column_id);
+    }
+}
+
+
+/**
+ * Optimized version of spmv_kernel using 128-bit (int4) reads for row_ptrs
+ * This reduces memory transactions and improves performance
+ */
+template <typename matrix_accessor, typename input_accessor,
+          typename output_accessor, typename IndexType, typename Closure>
+__device__ __forceinline__ void spmv_kernel_opt(
+    const IndexType nwarps, const IndexType num_rows,
+    acc::range<matrix_accessor> val, const IndexType* __restrict__ col_idxs,
+    const IndexType* __restrict__ row_ptrs, const IndexType* __restrict__ srow,
+    acc::range<input_accessor> b, acc::range<output_accessor> c, Closure scale)
+{
+    using arithmetic_type = typename output_accessor::arithmetic_type;
+    const IndexType warp_idx = blockIdx.x * warps_in_block + threadIdx.y;
+    const IndexType column_id = blockIdx.y;
+    if (warp_idx >= nwarps) {
+        return;
+    }
+    const IndexType data_size = row_ptrs[num_rows];
+    const IndexType start = get_warp_start_idx(nwarps, data_size, warp_idx);
+    constexpr IndexType wsize = config::warp_size;
+    const IndexType end =
+        min(get_warp_start_idx(nwarps, data_size, warp_idx + 1),
+            ceildivT<IndexType>(data_size, wsize) * wsize);
+
+    // Initialize row_ptrs cache for 128-bit vectorized reads
+    row_ptrs_cache<IndexType> cache;
+
+    auto row = srow[warp_idx];
+    // Use cache for initial row_end read - will trigger int4 load
+    auto row_end = cache.get(row_ptrs, row);
+    auto nrow = row;
+    auto nrow_end = row_end;
+    auto temp_val = zero<arithmetic_type>();
+    IndexType ind = start + threadIdx.x;
+    find_next_row_opt<true>(num_rows, data_size, ind, row, row_end, nrow,
+                            nrow_end, row_ptrs, cache);
+    const IndexType ind_end = end - wsize;
+    const auto tile_block =
+        group::tiled_partition<wsize>(group::this_thread_block());
+    for (; ind < ind_end; ind += wsize) {
+        process_window_opt<false>(tile_block, num_rows, data_size, ind, row,
+                                   row_end, nrow, nrow_end, temp_val, val,
+                                   col_idxs, row_ptrs, b, c, column_id, scale,
+                                   cache);
+    }
+    process_window_opt<true>(tile_block, num_rows, data_size, ind, row,
+                              row_end, nrow, nrow_end, temp_val, val, col_idxs,
+                              row_ptrs, b, c, column_id, scale, cache);
+    warp_atomic_add(tile_block, true, temp_val, row, c, column_id, scale);
+}
+
+
 template <typename matrix_accessor, typename input_accessor,
           typename output_accessor, typename IndexType>
 __global__ __launch_bounds__(spmv_block_size) void abstract_spmv(
@@ -256,16 +412,17 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv(
 {
     using arithmetic_type = typename output_accessor::arithmetic_type;
     using output_type = typename output_accessor::storage_type;
-    spmv_kernel(nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, c,
-                [](const arithmetic_type& x) {
-                    // using atomic add to accumluate data, so it needs to be
-                    // the output storage type
-                    // TODO: Does it make sense to use atomicCAS when the
-                    // arithmetic_type and output_type are different? It may
-                    // allow the non floating point storage or more precise
-                    // result.
-                    return static_cast<output_type>(x);
-                });
+    // Use optimized kernel with 128-bit int4 reads for row_ptrs
+    spmv_kernel_opt(nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, c,
+                    [](const arithmetic_type& x) {
+                        // using atomic add to accumluate data, so it needs to be
+                        // the output storage type
+                        // TODO: Does it make sense to use atomicCAS when the
+                        // arithmetic_type and output_type are different? It may
+                        // allow the non floating point storage or more precise
+                        // result.
+                        return static_cast<output_type>(x);
+                    });
 }
 
 
@@ -281,10 +438,11 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv(
     using arithmetic_type = typename output_accessor::arithmetic_type;
     using output_type = typename output_accessor::storage_type;
     const auto scale_factor = static_cast<arithmetic_type>(alpha[0]);
-    spmv_kernel(nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, c,
-                [&scale_factor](const arithmetic_type& x) {
-                    return static_cast<output_type>(scale_factor * x);
-                });
+    // Use optimized kernel with 128-bit int4 reads for row_ptrs
+    spmv_kernel_opt(nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, c,
+                    [&scale_factor](const arithmetic_type& x) {
+                        return static_cast<output_type>(scale_factor * x);
+                    });
 }
 
 
