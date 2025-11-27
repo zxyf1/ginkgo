@@ -242,7 +242,7 @@ template <unsigned subwarp_size, typename ValueType, typename IndexType,
 __device__ __forceinline__ void warp_atomic_add(
     const group::thread_block_tile<subwarp_size>& group, bool force_write,
     ValueType& val, const IndexType row, acc::range<output_accessor>& c,
-    const IndexType column_id, Closure&& scale)
+    const IndexType column_id, Closure scale)
 {
     // do a local scan to avoid atomic collisions
     const bool need_write = segment_scan(
@@ -265,7 +265,7 @@ __device__ __forceinline__ void process_window(
     ArithmeticType& temp_val, acc::range<MatrixAccessor> val,
     const IndexType* __restrict__ col_idxs,
     const IndexType* __restrict__ row_ptrs, acc::range<InputAccessor> b,
-    acc::range<OutputAccessor> c, const IndexType column_id, Closure&& scale)
+    acc::range<OutputAccessor> c, const IndexType column_id, Closure scale)
 {
     const auto curr_row = row;
     find_next_row<last>(num_rows, data_size, ind, row, row_end, nrow, nrow_end,
@@ -273,7 +273,7 @@ __device__ __forceinline__ void process_window(
     // segmented scan
     if (group.any(curr_row != row)) {
         warp_atomic_add<subwarp_size>(group, curr_row != row, temp_val, curr_row, c,
-                        column_id, std::forward<Closure>(scale));
+                        column_id, scale);
         nrow = group.shfl(row, subwarp_size - 1);
         nrow_end = group.shfl(row_end, subwarp_size - 1);
     }
