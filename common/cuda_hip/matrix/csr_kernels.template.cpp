@@ -214,6 +214,70 @@ __device__ __forceinline__ void spmv_kernel(
     using arithmetic_type = typename output_accessor::arithmetic_type;
     const IndexType warp_idx = blockIdx.x * warps_in_block + threadIdx.y;
     const IndexType column_id = blockIdx.y;
+
+    // Shared memory cache for vectorized loads
+    __shared__ IndexType srow_cache[warps_in_block];
+    __shared__ IndexType row_end_cache[warps_in_block];
+
+    // Phase 1: Vectorized load of srow array using ldg.B128
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        const IndexType base_warp_idx = blockIdx.x * warps_in_block;
+
+        if constexpr (sizeof(IndexType) == 4) {
+            // int32: load 4 elements in one transaction (16 bytes)
+            if (base_warp_idx + warps_in_block - 1 < nwarps) {
+                // Safe case: vectorized load
+                const int4* srow_vec = reinterpret_cast<const int4*>(
+                    srow + base_warp_idx);
+                int4 data = *srow_vec;  // Uses ldg.B128
+                srow_cache[0] = data.x;
+                srow_cache[1] = data.y;
+                srow_cache[2] = data.z;
+                srow_cache[3] = data.w;
+            } else {
+                // Boundary case: scalar loads
+                #pragma unroll
+                for (int i = 0; i < warps_in_block; ++i) {
+                    if (base_warp_idx + i < nwarps) {
+                        srow_cache[i] = srow[base_warp_idx + i];
+                    }
+                }
+            }
+        } else {  // sizeof(IndexType) == 8
+            // int64: two loads required (2 x 16 bytes)
+            if (base_warp_idx + warps_in_block - 1 < nwarps) {
+                const longlong2* srow_vec = reinterpret_cast<const longlong2*>(
+                    srow + base_warp_idx);
+                longlong2 data0 = srow_vec[0];  // Load srow[0], srow[1]
+                longlong2 data1 = srow_vec[1];  // Load srow[2], srow[3]
+                srow_cache[0] = data0.x;
+                srow_cache[1] = data0.y;
+                srow_cache[2] = data1.x;
+                srow_cache[3] = data1.y;
+            } else {
+                #pragma unroll
+                for (int i = 0; i < warps_in_block; ++i) {
+                    if (base_warp_idx + i < nwarps) {
+                        srow_cache[i] = srow[base_warp_idx + i];
+                    }
+                }
+            }
+        }
+    }
+
+    __syncthreads();  // Ensure srow_cache is populated
+
+    // Phase 2: Parallel load of row_ptrs (one thread per warp)
+    if (threadIdx.x == 0) {
+        const IndexType base_warp_idx = blockIdx.x * warps_in_block;
+        if (base_warp_idx + threadIdx.y < nwarps) {
+            IndexType row = srow_cache[threadIdx.y];
+            row_end_cache[threadIdx.y] = row_ptrs[row + 1];
+        }
+    }
+
+    __syncthreads();  // Ensure row_end_cache is populated
+
     if (warp_idx >= nwarps) {
         return;
     }
@@ -223,8 +287,9 @@ __device__ __forceinline__ void spmv_kernel(
     const IndexType end =
         min(get_warp_start_idx(nwarps, data_size, warp_idx + 1),
             ceildivT<IndexType>(data_size, wsize) * wsize);
-    auto row = srow[warp_idx];
-    auto row_end = row_ptrs[row + 1];
+    // Read from shared memory cache
+    auto row = srow_cache[threadIdx.y];
+    auto row_end = row_end_cache[threadIdx.y];
     auto nrow = row;
     auto nrow_end = row_end;
     auto temp_val = zero<arithmetic_type>();
