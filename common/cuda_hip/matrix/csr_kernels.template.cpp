@@ -302,7 +302,7 @@ __device__ __forceinline__ void warp_atomic_add_specialized(
     const bool need_write =
         segment_scan(group, row, val, [](double a, double b) { return a + b; });
     if (need_write && force_write) {
-        atomic_add(&c[row * c_stride + column_id], val);
+        atomicAdd(&c[row * c_stride + column_id], val);
     }
     if (!need_write || force_write) {
         val = zero<double>();
@@ -320,7 +320,7 @@ __device__ __forceinline__ void warp_atomic_add_specialized(
     const bool need_write =
         segment_scan(group, row, val, [](double a, double b) { return a + b; });
     if (need_write && force_write) {
-        atomic_add(&c[row * c_stride + column_id], alpha * val);
+        atomicAdd(&c[row * c_stride + column_id], alpha * val);
     }
     if (!need_write || force_write) {
         val = zero<double>();
