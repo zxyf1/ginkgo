@@ -292,35 +292,17 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv(
 namespace specialized {
 
 
-template <unsigned subwarp_size>
+template <unsigned subwarp_size, typename Closure>
 __device__ __forceinline__ void warp_atomic_add_specialized(
     const group::thread_block_tile<subwarp_size>& group, bool force_write,
     double& val, const int32 row, double* c, const int32 c_stride,
-    const int32 column_id)
+    const int32 column_id, Closure scale)
 {
     // do a local scan to avoid atomic collisions
     const bool need_write =
         segment_scan(group, row, val, [](double a, double b) { return a + b; });
     if (need_write && force_write) {
-        atomicAdd(&c[row * c_stride + column_id], val);
-    }
-    if (!need_write || force_write) {
-        val = zero<double>();
-    }
-}
-
-
-template <unsigned subwarp_size>
-__device__ __forceinline__ void warp_atomic_add_specialized(
-    const group::thread_block_tile<subwarp_size>& group, bool force_write,
-    double& val, const int32 row, double* c, const int32 c_stride,
-    const int32 column_id, double alpha)
-{
-    // do a local scan to avoid atomic collisions
-    const bool need_write =
-        segment_scan(group, row, val, [](double a, double b) { return a + b; });
-    if (need_write && force_write) {
-        atomicAdd(&c[row * c_stride + column_id], alpha * val);
+        atomicAdd(&c[row * c_stride + column_id], scale(val));
     }
     if (!need_write || force_write) {
         val = zero<double>();
@@ -343,8 +325,8 @@ __device__ __forceinline__ void process_window_specialized(
                         row_ptrs);
     // segmented scan
     if (group.any(curr_row != row)) {
-        scale(group, curr_row != row, temp_val, curr_row, c, c_stride,
-              column_id);
+        warp_atomic_add_specialized(group, curr_row != row, temp_val, curr_row,
+                                     c, c_stride, column_id, scale);
         nrow = group.shfl(row, subwarp_size - 1);
         nrow_end = group.shfl(row_end, subwarp_size - 1);
     }
@@ -394,7 +376,8 @@ __device__ __forceinline__ void spmv_kernel_specialized(
                                       row_end, nrow, nrow_end, temp_val, val,
                                       col_idxs, row_ptrs, b, b_stride, c,
                                       c_stride, column_id, scale);
-    scale(tile_block, true, temp_val, row, c, c_stride, column_id);
+    warp_atomic_add_specialized(tile_block, true, temp_val, row, c, c_stride,
+                                 column_id, scale);
 }
 
 
@@ -410,13 +393,7 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv_specialized(
 {
     specialized::spmv_kernel_specialized(
         nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, b_stride, c,
-        c_stride,
-        [](const auto& group, bool force_write, double& temp_val, int32 row,
-           double* c_ptr, int32 stride, int32 col_id) {
-            specialized::warp_atomic_add_specialized(group, force_write,
-                                                     temp_val, row, c_ptr,
-                                                     stride, col_id);
-        });
+        c_stride, [](double v) { return v; });
 }
 
 
@@ -431,13 +408,7 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv_specialized(
     const double scale_factor = alpha[0];
     specialized::spmv_kernel_specialized(
         nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, b_stride, c,
-        c_stride,
-        [scale_factor](const auto& group, bool force_write, double& temp_val,
-                       int32 row, double* c_ptr, int32 stride, int32 col_id) {
-            specialized::warp_atomic_add_specialized(
-                group, force_write, temp_val, row, c_ptr, stride, col_id,
-                scale_factor);
-        });
+        c_stride, [scale_factor](double v) { return scale_factor * v; });
 }
 
 
