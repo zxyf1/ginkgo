@@ -384,6 +384,11 @@ __device__ __forceinline__ void spmv_kernel_specialized(
 }  // namespace specialized
 
 
+}  // namespace kernel
+
+
+// Put specialized kernels in an anonymous namespace to avoid multiple definition
+namespace {
 // Specialized abstract_spmv for int32/double without accessor dependency
 __global__ __launch_bounds__(spmv_block_size) void abstract_spmv_specialized(
     const int32 nwarps, const int32 num_rows, const double* __restrict__ val,
@@ -391,7 +396,7 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv_specialized(
     const int32* __restrict__ srow, const double* __restrict__ b,
     const int32 b_stride, double* c, const int32 c_stride)
 {
-    specialized::spmv_kernel_specialized(
+    kernel::specialized::spmv_kernel_specialized(
         nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, b_stride, c,
         c_stride, [](double v) { return v; });
 }
@@ -406,10 +411,13 @@ __global__ __launch_bounds__(spmv_block_size) void abstract_spmv_specialized(
     const int32 c_stride)
 {
     const double scale_factor = alpha[0];
-    specialized::spmv_kernel_specialized(
+    kernel::specialized::spmv_kernel_specialized(
         nwarps, num_rows, val, col_idxs, row_ptrs, srow, b, b_stride, c,
         c_stride, [scale_factor](double v) { return scale_factor * v; });
 }
+}  // anonymous namespace
+
+namespace kernel {
 
 
 template <typename IndexType>
@@ -2310,7 +2318,7 @@ bool load_balance_spmv(std::shared_ptr<const DefaultExecutor> exec,
                           std::is_same_v<OutputValueType, double>) {
                 if (alpha) {
                     if (csr_grid.x > 0 && csr_grid.y > 0) {
-                        kernel::abstract_spmv_specialized<<<
+                        abstract_spmv_specialized<<<
                             csr_grid, csr_block, 0, exec->get_stream()>>>(
                             nwarps, static_cast<int32>(a->get_size()[0]),
                             alpha->get_const_values(), a->get_const_values(),
@@ -2322,7 +2330,7 @@ bool load_balance_spmv(std::shared_ptr<const DefaultExecutor> exec,
                     }
                 } else {
                     if (csr_grid.x > 0 && csr_grid.y > 0) {
-                        kernel::abstract_spmv_specialized<<<
+                        abstract_spmv_specialized<<<
                             csr_grid, csr_block, 0, exec->get_stream()>>>(
                             nwarps, static_cast<int32>(a->get_size()[0]),
                             a->get_const_values(), a->get_const_col_idxs(),
