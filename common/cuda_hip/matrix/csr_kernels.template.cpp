@@ -338,6 +338,74 @@ __device__ __forceinline__ void process_window_specialized(
 }
 
 
+// Unrolled version: process 2 elements at once with register buffering
+template <bool last, unsigned subwarp_size, typename Closure>
+__device__ __forceinline__ void process_window_specialized_unroll2(
+    const group::thread_block_tile<subwarp_size>& group, const int32 num_rows,
+    const int32 data_size, const int32 ind, int32& row, int32& row_end,
+    int32& nrow, int32& nrow_end, double& temp_val,
+    const double* __restrict__ val, const int32* __restrict__ col_idxs,
+    const int32* __restrict__ row_ptrs, const double* __restrict__ b,
+    const int32 b_stride, double* c, const int32 c_stride,
+    const int32 column_id, Closure scale)
+{
+    constexpr int32 wsize = subwarp_size;
+    const int32 ind1 = ind;
+    const int32 ind2 = ind + wsize;
+
+    // Prefetch data into registers
+    double val_temp[2];
+    double b_temp[2];
+    int32 col_temp[2];
+
+    // Load first element
+    if (!last || ind1 < data_size) {
+        col_temp[0] = col_idxs[ind1];
+        val_temp[0] = val[ind1];
+        b_temp[0] = b[col_temp[0] * b_stride + column_id];
+    }
+
+    // Load second element
+    if (!last || ind2 < data_size) {
+        col_temp[1] = col_idxs[ind2];
+        val_temp[1] = val[ind2];
+        b_temp[1] = b[col_temp[1] * b_stride + column_id];
+    }
+
+    // Process first element
+    {
+        const auto curr_row = row;
+        find_next_row<false>(num_rows, data_size, ind1, row, row_end, nrow,
+                             nrow_end, row_ptrs);
+        if (group.any(curr_row != row)) {
+            warp_atomic_add_specialized(group, curr_row != row, temp_val,
+                                         curr_row, c, c_stride, column_id, scale);
+            nrow = group.shfl(row, wsize - 1);
+            nrow_end = group.shfl(row_end, wsize - 1);
+        }
+        if (!last || ind1 < data_size) {
+            temp_val += val_temp[0] * b_temp[0];
+        }
+    }
+
+    // Process second element
+    {
+        const auto curr_row = row;
+        find_next_row<last>(num_rows, data_size, ind2, row, row_end, nrow,
+                            nrow_end, row_ptrs);
+        if (group.any(curr_row != row)) {
+            warp_atomic_add_specialized(group, curr_row != row, temp_val,
+                                         curr_row, c, c_stride, column_id, scale);
+            nrow = group.shfl(row, wsize - 1);
+            nrow_end = group.shfl(row_end, wsize - 1);
+        }
+        if (!last || ind2 < data_size) {
+            temp_val += val_temp[1] * b_temp[1];
+        }
+    }
+}
+
+
 template <typename Closure>
 __device__ __forceinline__ void spmv_kernel_specialized(
     const int32 nwarps, const int32 num_rows, const double* __restrict__ val,
@@ -364,14 +432,27 @@ __device__ __forceinline__ void spmv_kernel_specialized(
     find_next_row<true>(num_rows, data_size, ind, row, row_end, nrow, nrow_end,
                         row_ptrs);
     const int32 ind_end = end - wsize;
+    const int32 ind_end_unroll = end - 2 * wsize;
     const auto tile_block =
         group::tiled_partition<wsize>(group::this_thread_block());
+
+    // Main loop with unroll factor 2
+    for (; ind < ind_end_unroll; ind += 2 * wsize) {
+        process_window_specialized_unroll2<false>(
+            tile_block, num_rows, data_size, ind, row, row_end, nrow, nrow_end,
+            temp_val, val, col_idxs, row_ptrs, b, b_stride, c, c_stride,
+            column_id, scale);
+    }
+
+    // Process remaining elements (1 or 0 iterations)
     for (; ind < ind_end; ind += wsize) {
         process_window_specialized<false>(
             tile_block, num_rows, data_size, ind, row, row_end, nrow, nrow_end,
             temp_val, val, col_idxs, row_ptrs, b, b_stride, c, c_stride,
             column_id, scale);
     }
+
+    // Process last window
     process_window_specialized<true>(tile_block, num_rows, data_size, ind, row,
                                       row_end, nrow, nrow_end, temp_val, val,
                                       col_idxs, row_ptrs, b, b_stride, c,
