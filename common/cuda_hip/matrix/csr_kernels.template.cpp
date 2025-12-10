@@ -338,12 +338,12 @@ __device__ __forceinline__ void process_window_specialized(
 }
 
 
-// Unrolled version: process 2 elements at once with register buffering
-// Uses vectorized loads (double2) when possible for better memory bandwidth
+// Vectorized version: each thread processes 2 consecutive elements
+// Uses double2/int2 for aligned consecutive memory access (128-bit loads)
 template <bool last, unsigned subwarp_size, typename Closure>
-__device__ __forceinline__ void process_window_specialized_unroll2(
+__device__ __forceinline__ void process_window_specialized_vec2(
     const group::thread_block_tile<subwarp_size>& group, const int32 num_rows,
-    const int32 data_size, const int32 ind, int32& row, int32& row_end,
+    const int32 data_size, const int32 base_ind, int32& row, int32& row_end,
     int32& nrow, int32& nrow_end, double& temp_val,
     const double* __restrict__ val, const int32* __restrict__ col_idxs,
     const int32* __restrict__ row_ptrs, const double* __restrict__ b,
@@ -351,56 +351,32 @@ __device__ __forceinline__ void process_window_specialized_unroll2(
     const int32 column_id, Closure scale)
 {
     constexpr int32 wsize = subwarp_size;
-    const int32 ind1 = ind;
-    const int32 ind2 = ind + wsize;
 
-    // Prefetch data into registers
+    // Each thread processes 2 consecutive elements: base_ind and base_ind+1
+    const int32 ind1 = base_ind;
+    const int32 ind2 = base_ind + 1;
+
+    // Try to use vectorized loads for consecutive pairs
     double val_temp[2];
-    double b_temp[2];
     int32 col_temp[2];
+    double b_temp[2];
 
-    // Vectorized load for val if consecutive elements are accessible
-    // Check if we can use double2 load (requires consecutive + aligned access)
     if constexpr (!last) {
-        // In the main loop, try vectorized load for consecutive pairs
-        if ((ind1 & 1) == 0 && ind1 + 1 < data_size) {
-            // ind1 is even and ind1+1 is valid, use double2 for val[ind1:ind1+1]
-            const double2 val_vec = *reinterpret_cast<const double2*>(&val[ind1]);
-            val_temp[0] = val_vec.x;
-            // Note: val_temp[1] will be loaded separately for ind2
-        } else {
-            val_temp[0] = val[ind1];
-        }
+        // Main loop: assume both elements are within bounds
+        // Use vectorized loads for consecutive elements
+        const double2 val_vec = *reinterpret_cast<const double2*>(&val[ind1]);
+        val_temp[0] = val_vec.x;
+        val_temp[1] = val_vec.y;
 
-        if ((ind2 & 1) == 0 && ind2 + 1 < data_size) {
-            const double2 val_vec = *reinterpret_cast<const double2*>(&val[ind2]);
-            val_temp[1] = val_vec.x;
-        } else {
-            val_temp[1] = val[ind2];
-        }
+        const int2 col_vec = *reinterpret_cast<const int2*>(&col_idxs[ind1]);
+        col_temp[0] = col_vec.x;
+        col_temp[1] = col_vec.y;
 
-        // Load column indices (try int2 for vectorization)
-        if ((ind1 & 1) == 0 && ind1 + 1 < data_size) {
-            const int2 col_vec =
-                *reinterpret_cast<const int2*>(&col_idxs[ind1]);
-            col_temp[0] = col_vec.x;
-        } else {
-            col_temp[0] = col_idxs[ind1];
-        }
-
-        if ((ind2 & 1) == 0 && ind2 + 1 < data_size) {
-            const int2 col_vec =
-                *reinterpret_cast<const int2*>(&col_idxs[ind2]);
-            col_temp[1] = col_vec.x;
-        } else {
-            col_temp[1] = col_idxs[ind2];
-        }
-
-        // Load b values
+        // Load b values (these may not be consecutive)
         b_temp[0] = b[col_temp[0] * b_stride + column_id];
         b_temp[1] = b[col_temp[1] * b_stride + column_id];
     } else {
-        // Last iteration: use scalar loads with bounds checking
+        // Last iteration: need bounds checking
         if (ind1 < data_size) {
             col_temp[0] = col_idxs[ind1];
             val_temp[0] = val[ind1];
@@ -414,7 +390,7 @@ __device__ __forceinline__ void process_window_specialized_unroll2(
         }
     }
 
-    // Process first element
+    // Process first element (ind1)
     {
         const auto curr_row = row;
         find_next_row<false>(num_rows, data_size, ind1, row, row_end, nrow,
@@ -430,7 +406,7 @@ __device__ __forceinline__ void process_window_specialized_unroll2(
         }
     }
 
-    // Process second element
+    // Process second element (ind2)
     {
         const auto curr_row = row;
         find_next_row<last>(num_rows, data_size, ind2, row, row_end, nrow,
@@ -464,41 +440,54 @@ __device__ __forceinline__ void spmv_kernel_specialized(
     const int32 start = get_warp_start_idx(nwarps, data_size, warp_idx);
     constexpr int32 wsize = config::warp_size;
     const int32 end = min(get_warp_start_idx(nwarps, data_size, warp_idx + 1),
-                          ceildivT<int32>(data_size, wsize) * wsize);
+                          ceildivT<int32>(data_size, 2 * wsize) * 2 * wsize);
     auto row = srow[warp_idx];
     auto row_end = row_ptrs[row + 1];
     auto nrow = row;
     auto nrow_end = row_end;
     auto temp_val = zero<double>();
-    int32 ind = start + threadIdx.x;
+
+    // Each thread processes 2 consecutive elements per iteration
+    // Thread i handles elements: 2*i, 2*i+1, 2*i+2*wsize, 2*i+2*wsize+1, ...
+    int32 ind = start + 2 * threadIdx.x;
     find_next_row<true>(num_rows, data_size, ind, row, row_end, nrow, nrow_end,
                         row_ptrs);
-    const int32 ind_end = end - wsize;
-    const int32 ind_end_unroll = end - 2 * wsize;
+    const int32 ind_end_vec = end - 2 * wsize;
     const auto tile_block =
         group::tiled_partition<wsize>(group::this_thread_block());
 
-    // Main loop with unroll factor 2
-    for (; ind < ind_end_unroll; ind += 2 * wsize) {
-        process_window_specialized_unroll2<false>(
+    // Main vectorized loop: each thread processes 2 consecutive elements
+    for (; ind < ind_end_vec; ind += 2 * wsize) {
+        process_window_specialized_vec2<false>(
             tile_block, num_rows, data_size, ind, row, row_end, nrow, nrow_end,
             temp_val, val, col_idxs, row_ptrs, b, b_stride, c, c_stride,
             column_id, scale);
     }
 
-    // Process remaining elements (1 or 0 iterations)
-    for (; ind < ind_end; ind += wsize) {
+    // Cleanup: handle remaining elements with scalar processing
+    // Switch back to single-element-per-thread mode for cleanup
+    if (ind < data_size) {
+        // Process the first remaining element
         process_window_specialized<false>(
             tile_block, num_rows, data_size, ind, row, row_end, nrow, nrow_end,
             temp_val, val, col_idxs, row_ptrs, b, b_stride, c, c_stride,
             column_id, scale);
+
+        // Process the second element if it exists
+        const int32 ind2 = ind + 1;
+        if (ind2 < data_size) {
+            process_window_specialized<true>(
+                tile_block, num_rows, data_size, ind2, row, row_end, nrow,
+                nrow_end, temp_val, val, col_idxs, row_ptrs, b, b_stride, c,
+                c_stride, column_id, scale);
+        } else {
+            // Last element already processed, just finalize
+            warp_atomic_add_specialized(tile_block, true, temp_val, row, c,
+                                         c_stride, column_id, scale);
+            return;
+        }
     }
 
-    // Process last window
-    process_window_specialized<true>(tile_block, num_rows, data_size, ind, row,
-                                      row_end, nrow, nrow_end, temp_val, val,
-                                      col_idxs, row_ptrs, b, b_stride, c,
-                                      c_stride, column_id, scale);
     warp_atomic_add_specialized(tile_block, true, temp_val, row, c, c_stride,
                                  column_id, scale);
 }
