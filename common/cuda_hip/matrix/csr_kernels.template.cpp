@@ -339,6 +339,7 @@ __device__ __forceinline__ void process_window_specialized(
 
 
 // Unrolled version: process 2 elements at once with register buffering
+// Uses vectorized loads (double2) when possible for better memory bandwidth
 template <bool last, unsigned subwarp_size, typename Closure>
 __device__ __forceinline__ void process_window_specialized_unroll2(
     const group::thread_block_tile<subwarp_size>& group, const int32 num_rows,
@@ -358,18 +359,59 @@ __device__ __forceinline__ void process_window_specialized_unroll2(
     double b_temp[2];
     int32 col_temp[2];
 
-    // Load first element
-    if (!last || ind1 < data_size) {
-        col_temp[0] = col_idxs[ind1];
-        val_temp[0] = val[ind1];
-        b_temp[0] = b[col_temp[0] * b_stride + column_id];
-    }
+    // Vectorized load for val if consecutive elements are accessible
+    // Check if we can use double2 load (requires consecutive + aligned access)
+    if constexpr (!last) {
+        // In the main loop, try vectorized load for consecutive pairs
+        if ((ind1 & 1) == 0 && ind1 + 1 < data_size) {
+            // ind1 is even and ind1+1 is valid, use double2 for val[ind1:ind1+1]
+            const double2 val_vec = *reinterpret_cast<const double2*>(&val[ind1]);
+            val_temp[0] = val_vec.x;
+            // Note: val_temp[1] will be loaded separately for ind2
+        } else {
+            val_temp[0] = val[ind1];
+        }
 
-    // Load second element
-    if (!last || ind2 < data_size) {
-        col_temp[1] = col_idxs[ind2];
-        val_temp[1] = val[ind2];
+        if ((ind2 & 1) == 0 && ind2 + 1 < data_size) {
+            const double2 val_vec = *reinterpret_cast<const double2*>(&val[ind2]);
+            val_temp[1] = val_vec.x;
+        } else {
+            val_temp[1] = val[ind2];
+        }
+
+        // Load column indices (try int2 for vectorization)
+        if ((ind1 & 1) == 0 && ind1 + 1 < data_size) {
+            const int2 col_vec =
+                *reinterpret_cast<const int2*>(&col_idxs[ind1]);
+            col_temp[0] = col_vec.x;
+        } else {
+            col_temp[0] = col_idxs[ind1];
+        }
+
+        if ((ind2 & 1) == 0 && ind2 + 1 < data_size) {
+            const int2 col_vec =
+                *reinterpret_cast<const int2*>(&col_idxs[ind2]);
+            col_temp[1] = col_vec.x;
+        } else {
+            col_temp[1] = col_idxs[ind2];
+        }
+
+        // Load b values
+        b_temp[0] = b[col_temp[0] * b_stride + column_id];
         b_temp[1] = b[col_temp[1] * b_stride + column_id];
+    } else {
+        // Last iteration: use scalar loads with bounds checking
+        if (ind1 < data_size) {
+            col_temp[0] = col_idxs[ind1];
+            val_temp[0] = val[ind1];
+            b_temp[0] = b[col_temp[0] * b_stride + column_id];
+        }
+
+        if (ind2 < data_size) {
+            col_temp[1] = col_idxs[ind2];
+            val_temp[1] = val[ind2];
+            b_temp[1] = b[col_temp[1] * b_stride + column_id];
+        }
     }
 
     // Process first element
