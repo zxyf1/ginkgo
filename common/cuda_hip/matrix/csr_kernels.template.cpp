@@ -129,15 +129,48 @@ __device__ __forceinline__ void find_next_row(
     IndexType& row, IndexType& row_end, const IndexType row_predict,
     const IndexType row_predict_end, const IndexType* __restrict__ row_ptr)
 {
+    // Hybrid search strategy for finding the row containing ind
     if (!overflow || ind < data_size) {
         if (ind >= row_end) {
             row = row_predict;
             row_end = row_predict_end;
-            while (ind >= row_end) {
-                row_end = row_ptr[++row + 1];
+
+            // Configuration for hybrid search
+            constexpr IndexType MAX_LINEAR_SCAN = 48;  // Max steps for linear scan
+            constexpr IndexType JUMP_SIZE = 8;         // Jump size for large gaps
+
+            IndexType scan_count = 0;
+
+            // Phase 1: Limited linear scan to avoid empty row traps
+            while (ind >= row_end && scan_count < MAX_LINEAR_SCAN &&
+                   row < num_rows - 1) {
+                ++row;
+                row_end = row_ptr[row + 1];
+                ++scan_count;
+            }
+
+            // Phase 2: If still not found, use jump search for large gaps
+            if (ind >= row_end && row < num_rows - 1) {
+                // Jump ahead to reduce search space
+                while (row + JUMP_SIZE < num_rows) {
+                    IndexType test_row = row + JUMP_SIZE;
+                    IndexType test_end = row_ptr[test_row + 1];
+
+                    if (ind < test_end) {
+                        // Target is within this jump range, do linear scan
+                        break;
+                    }
+                    row = test_row;
+                    row_end = test_end;
+                }
+
+                // Final linear scan within the jump range
+                while (ind >= row_end && row < num_rows - 1) {
+                    ++row;
+                    row_end = row_ptr[row + 1];
+                }
             }
         }
-
     } else {
         row = num_rows - 1;
         row_end = data_size;
