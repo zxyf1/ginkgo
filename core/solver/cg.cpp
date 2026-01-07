@@ -4,6 +4,7 @@
 
 #include "ginkgo/core/solver/cg.hpp"
 
+#include <iostream>
 #include <string>
 
 #include <ginkgo/core/base/exception.hpp>
@@ -146,6 +147,15 @@ void Cg<ValueType>::apply_dense_impl(const VectorType* dense_b,
         r->compute_conj_dot(z, rho, reduction_tmp);
 
         ++iter;
+
+        // Log detailed CG step information
+        if (!exec->get_loggers().empty()) {
+            auto rho_host = gko::clone(exec->get_master(), rho);
+            std::cout << "CG Iteration " << iter << ":" << std::endl;
+            std::cout << "  rho (r^T * z) = "
+                      << rho_host->at(0, 0) << std::endl;
+        }
+
         bool all_stopped =
             stop_criterion->update()
                 .num_iterations(iter)
@@ -165,10 +175,30 @@ void Cg<ValueType>::apply_dense_impl(const VectorType* dense_b,
         exec->run(cg::make_step_1(gko::detail::get_local(p),
                                   gko::detail::get_local(z), rho, prev_rho,
                                   &stop_status));
+
+        // Log beta value after step 1
+        if (!exec->get_loggers().empty() && iter > 0) {
+            auto rho_host = gko::clone(exec->get_master(), rho);
+            auto prev_rho_host = gko::clone(exec->get_master(), prev_rho);
+            std::cout << "  beta (rho/prev_rho) = "
+                      << rho_host->at(0, 0) / prev_rho_host->at(0, 0)
+                      << std::endl;
+        }
+
         // q = A * p
         this->get_system_matrix()->apply(p, q);
         // beta = dot(p, q)
         p->compute_conj_dot(q, beta, reduction_tmp);
+
+        // Log alpha calculation
+        if (!exec->get_loggers().empty()) {
+            auto rho_host = gko::clone(exec->get_master(), rho);
+            auto beta_host = gko::clone(exec->get_master(), beta);
+            std::cout << "  p^T * q = " << beta_host->at(0, 0) << std::endl;
+            std::cout << "  alpha (rho/beta) = "
+                      << rho_host->at(0, 0) / beta_host->at(0, 0) << std::endl;
+        }
+
         // tmp = rho / beta
         // x = x + tmp * p
         // r = r - tmp * q
