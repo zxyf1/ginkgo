@@ -104,13 +104,20 @@ struct ResidualLogger : gko::log::Logger {
             std::cout << "Detailed CG Iteration Operations:" << std::endl;
             std::cout << "========================================" << std::endl;
 
-            // Iterate through each iteration's operations
-            std::size_t start_idx = 0;
-            for (std::size_t iter = 0; iter < iteration_boundaries.size(); iter++) {
-                std::size_t end_idx = iteration_boundaries[iter];
+            // Typically, each CG iteration has 2 operations: Precond and SpMV
+            // Due to the timing of iteration_complete callback, boundaries are
+            // marked between Precond and SpMV, so we use a fixed-size approach
+            const std::size_t ops_per_iteration = 2;
+
+            for (std::size_t iter = 0; iter < iterations.size(); iter++) {
+                std::size_t start_idx = iter * ops_per_iteration;
+                std::size_t end_idx = std::min(start_idx + ops_per_iteration,
+                                              operation_logs.size());
+
+                if (start_idx >= operation_logs.size()) break;
 
                 // Print iteration header
-                std::cout << "\n--- Iteration " << iter << " ---" << std::endl;
+                std::cout << "\n--- Iteration " << iterations[iter] << " ---" << std::endl;
                 std::cout << std::setw(20) << "Operation" << " | "
                           << std::setw(18) << "Input Norm" << " | "
                           << std::setw(18) << "Output Norm" << std::endl;
@@ -118,7 +125,7 @@ struct ResidualLogger : gko::log::Logger {
                           << std::setfill(' ') << std::endl;
 
                 // Print operations for this iteration
-                for (std::size_t op_idx = start_idx; op_idx < end_idx && op_idx < operation_logs.size(); op_idx++) {
+                for (std::size_t op_idx = start_idx; op_idx < end_idx; op_idx++) {
                     const auto& log = operation_logs[op_idx];
                     std::cout << std::scientific;
                     std::cout << std::setw(20) << log.operation_type << " | "
@@ -126,8 +133,6 @@ struct ResidualLogger : gko::log::Logger {
                               << std::setw(18) << log.output_norm << std::endl;
                     std::cout.unsetf(std::ios_base::floatfield);
                 }
-
-                start_idx = end_idx;
             }
             std::cout << std::endl;
         }
