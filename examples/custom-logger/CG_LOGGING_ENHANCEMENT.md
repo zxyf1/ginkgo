@@ -35,6 +35,7 @@ struct OperationLog {
 - `on_linop_apply_completed()`: 拦截线性算子应用完成事件
 - `set_system_matrix()`: 设置系统矩阵引用以识别 SpMV 操作
 - `set_preconditioner()`: 设置预条件子引用以识别预条件化操作
+- `needs_propagation()`: 重写此方法返回 true，允许接收从 executor 传播的事件
 
 ## CG 算法步骤解析
 
@@ -113,8 +114,28 @@ Detailed CG Iteration Operations:
 2. 增强了 `write()` 方法以显示详细的操作日志
 3. 添加了 `on_linop_apply_completed()` 方法来拦截 LinOp 应用事件
 4. 添加了 `set_system_matrix()` 和 `set_preconditioner()` 方法
-5. 更新了构造函数以包含 `linop_apply_completed_mask`
-6. 在 `main()` 函数中设置系统矩阵和预条件子引用
+5. 重写了 `needs_propagation()` 方法返回 true
+6. 更新了构造函数以包含 `linop_apply_completed_mask`
+7. 在 `main()` 函数中：
+   - 将 logger 添加到 executor（捕获所有 LinOp 操作）
+   - 将 logger 添加到 solver factory（捕获迭代信息）
+   - 设置系统矩阵和预条件子引用
+
+## 关键实现细节
+
+### Logger 事件传播机制
+
+为了捕获 CG 迭代内部的 LinOp 操作（SpMV 和预条件化），需要：
+
+1. **重写 `needs_propagation()`**：返回 true，使 logger 可以接收从 executor 传播的事件
+2. **添加到 executor**：`exec->add_logger(logger)` - 这样可以捕获在该 executor 上执行的所有 LinOp 操作
+3. **添加到 solver factory**：`solver_gen->add_logger(logger)` - 这样可以捕获迭代完成事件
+
+### 操作过滤
+
+由于 logger 会接收所有 LinOp apply 事件，`on_linop_apply_completed()` 方法实现了过滤机制：
+- 只记录与 `system_matrix_` 或 `preconditioner_` 匹配的操作
+- 忽略其他不相关的 LinOp 操作
 
 ## 与原版的区别
 

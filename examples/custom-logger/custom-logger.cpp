@@ -205,14 +205,23 @@ struct ResidualLogger : gko::log::Logger {
     void on_linop_apply_completed(const gko::LinOp* A, const gko::LinOp* b,
                                   const gko::LinOp* x) const override
     {
-        // Try to identify the type of operation
-        std::string op_type = "apply";
+        // Only log operations related to system matrix or preconditioner
+        // This filters out operations from other sources
+        bool is_relevant = false;
+        std::string op_type;
 
         // Check if this is the system matrix (SpMV) or preconditioner
         if (system_matrix_ && A == system_matrix_) {
             op_type = "SpMV (A*p->q)";
+            is_relevant = true;
         } else if (preconditioner_ && A == preconditioner_) {
             op_type = "Precond (M*r->z)";
+            is_relevant = true;
+        }
+
+        // Only log relevant operations
+        if (!is_relevant) {
+            return;
         }
 
         // Compute norms of input and output
@@ -239,6 +248,9 @@ struct ResidualLogger : gko::log::Logger {
     void set_preconditioner(const gko::LinOp* precond) {
         preconditioner_ = precond;
     }
+
+    // Override needs_propagation to receive events from executor
+    bool needs_propagation() const override { return true; }
 
     // Construct the logger with both iteration_complete and linop_apply events
     ResidualLogger()
@@ -361,6 +373,10 @@ int main(int argc, char* argv[])
 
     // Set system matrix reference for operation identification
     logger->set_system_matrix(A.get());
+
+    // Add the logger to both the executor and solver factory
+    // Adding to executor allows capturing all LinOp operations
+    exec->add_logger(logger);
 
     // Add the previously created logger to the solver factory. The logger
     // will be automatically propagated to all solvers created from this
