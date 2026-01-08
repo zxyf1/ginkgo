@@ -148,6 +148,12 @@ struct ResidualLogger : gko::log::Logger {
                                const gko::array<gko::stopping_status>*,
                                bool) const override
     {
+        // Avoid duplicate logging - since logger is added to both executor and solver,
+        // this callback may be called twice for the same iteration
+        if (!iterations.empty() && iterations.back() == iteration) {
+            return;
+        }
+
         // Mark the boundary for this iteration's operations
         iteration_boundaries.push_back(operation_logs.size());
 

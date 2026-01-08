@@ -137,6 +137,20 @@ Detailed CG Iteration Operations:
 - 只记录与 `system_matrix_` 或 `preconditioner_` 匹配的操作
 - 忽略其他不相关的 LinOp 操作
 
+### 迭代去重
+
+由于 logger 同时添加到 executor 和 solver factory，且 `needs_propagation()` 返回 true，每个迭代的 `on_iteration_complete` 会被调用两次：
+1. 来自 solver 的直接通知
+2. 通过 executor 的事件传播
+
+为避免重复记录，`on_iteration_complete()` 实现了去重逻辑：
+```cpp
+// 检查当前迭代是否已经被记录
+if (!iterations.empty() && iterations.back() == iteration) {
+    return;  // 跳过重复的回调
+}
+```
+
 ## 与原版的区别
 
 | 特性 | 原版 | 增强版 |
