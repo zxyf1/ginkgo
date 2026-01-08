@@ -54,16 +54,25 @@ gko::remove_complex<ValueType> compute_norm(
 
 // Custom logger class which intercepts the residual norm scalar and solution
 // vector in order to print a table of real vs recurrent (internal to the
-// solvers) residual norms.
+// solvers) residual norms, plus detailed CG iteration operations.
 template <typename ValueType>
 struct ResidualLogger : gko::log::Logger {
     using RealValueType = gko::remove_complex<ValueType>;
+
+    // Struct to store detailed operation information within an iteration
+    struct OperationLog {
+        std::string operation_type;  // e.g., "SpMV", "Preconditioner"
+        RealValueType input_norm;
+        RealValueType output_norm;
+    };
+
     // Output the logger's data in a table format
     void write() const
     {
         // Print a header for the table
-        std::cout << "Recurrent vs true vs implicit residual norm:"
-                  << std::endl;
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Iteration-level Summary:" << std::endl;
+        std::cout << "========================================" << std::endl;
         std::cout << '|' << std::setw(10) << "Iteration" << '|' << std::setw(25)
                   << "Recurrent Residual Norm" << '|' << std::setw(25)
                   << "True Residual Norm" << '|' << std::setw(25)
@@ -88,6 +97,35 @@ struct ResidualLogger : gko::log::Logger {
         std::cout << '|' << std::setfill('-') << std::setw(11) << '|'
                   << std::setw(26) << '|' << std::setw(26) << '|'
                   << std::setw(26) << '|' << std::setfill(' ') << std::endl;
+
+        // Print detailed operation logs for CG iterations
+        if (!operation_logs.empty()) {
+            std::cout << "\n========================================" << std::endl;
+            std::cout << "Detailed CG Iteration Operations:" << std::endl;
+            std::cout << "========================================" << std::endl;
+
+            std::size_t current_iter = 0;
+            std::size_t op_idx = 0;
+            for (const auto& log : operation_logs) {
+                if (op_idx < iteration_boundaries.size() &&
+                    op_idx == iteration_boundaries[current_iter]) {
+                    std::cout << "\n--- Iteration " << current_iter << " ---" << std::endl;
+                    std::cout << std::setw(20) << "Operation" << " | "
+                              << std::setw(18) << "Input Norm" << " | "
+                              << std::setw(18) << "Output Norm" << std::endl;
+                    std::cout << std::setfill('-') << std::setw(70) << ""
+                              << std::setfill(' ') << std::endl;
+                    current_iter++;
+                }
+                std::cout << std::scientific;
+                std::cout << std::setw(20) << log.operation_type << " | "
+                          << std::setw(18) << log.input_norm << " | "
+                          << std::setw(18) << log.output_norm << std::endl;
+                std::cout.unsetf(std::ios_base::floatfield);
+                op_idx++;
+            }
+            std::cout << std::endl;
+        }
     }
 
     using gko_dense = gko::matrix::Dense<ValueType>;
@@ -105,6 +143,9 @@ struct ResidualLogger : gko::log::Logger {
                                const gko::array<gko::stopping_status>*,
                                bool) const override
     {
+        // Mark the boundary for this iteration's operations
+        iteration_boundaries.push_back(operation_logs.size());
+
         // If the solver shares a residual norm, log its value
         if (residual_norm) {
             auto dense_norm = gko::as<gko_real_dense>(residual_norm);
@@ -160,9 +201,49 @@ struct ResidualLogger : gko::log::Logger {
         iterations.push_back(iteration);
     }
 
-    // Construct the logger
+    // Intercept LinOp apply operations to track internal CG steps
+    void on_linop_apply_completed(const gko::LinOp* A, const gko::LinOp* b,
+                                  const gko::LinOp* x) const override
+    {
+        // Try to identify the type of operation
+        std::string op_type = "apply";
+
+        // Check if this is the system matrix (SpMV) or preconditioner
+        if (system_matrix_ && A == system_matrix_) {
+            op_type = "SpMV (A*p->q)";
+        } else if (preconditioner_ && A == preconditioner_) {
+            op_type = "Precond (M*r->z)";
+        }
+
+        // Compute norms of input and output
+        RealValueType input_norm = -1.0;
+        RealValueType output_norm = -1.0;
+
+        try {
+            if (auto dense_b = dynamic_cast<const gko_dense*>(b)) {
+                input_norm = compute_norm(dense_b);
+            }
+            if (auto dense_x = dynamic_cast<const gko_dense*>(x)) {
+                output_norm = compute_norm(dense_x);
+            }
+        } catch (...) {
+            // If we can't compute norms, just continue
+        }
+
+        // Log the operation
+        operation_logs.push_back({op_type, input_norm, output_norm});
+    }
+
+    // Store reference to system matrix and preconditioner for identification
+    void set_system_matrix(const gko::LinOp* matrix) { system_matrix_ = matrix; }
+    void set_preconditioner(const gko::LinOp* precond) {
+        preconditioner_ = precond;
+    }
+
+    // Construct the logger with both iteration_complete and linop_apply events
     ResidualLogger()
-        : gko::log::Logger(gko::log::Logger::iteration_complete_mask)
+        : gko::log::Logger(gko::log::Logger::iteration_complete_mask |
+                          gko::log::Logger::linop_apply_completed_mask)
     {}
 
 private:
@@ -174,6 +255,14 @@ private:
     mutable std::vector<RealValueType> implicit_norms{};
     // Vector which stores all the iteration numbers
     mutable std::vector<std::size_t> iterations{};
+
+    // Detailed operation logs for CG iterations
+    mutable std::vector<OperationLog> operation_logs{};
+    mutable std::vector<std::size_t> iteration_boundaries{};
+
+    // References for operation identification
+    const gko::LinOp* system_matrix_{nullptr};
+    const gko::LinOp* preconditioner_{nullptr};
 };
 
 
@@ -270,6 +359,9 @@ int main(int argc, char* argv[])
     // Instantiate a ResidualLogger logger.
     auto logger = std::make_shared<ResidualLogger<ValueType>>();
 
+    // Set system matrix reference for operation identification
+    logger->set_system_matrix(A.get());
+
     // Add the previously created logger to the solver factory. The logger
     // will be automatically propagated to all solvers created from this
     // factory.
@@ -285,6 +377,14 @@ int main(int argc, char* argv[])
     // in the custom-matrix-format example
     auto solver = solver_gen->generate(A);
 
+    // Store preconditioner reference after solver generation for detailed logging
+    auto cg_solver = gko::as<cg>(solver.get());
+    logger->set_preconditioner(cg_solver->get_preconditioner().get());
+
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Starting CG solver with detailed logging" << std::endl;
+    std::cout << "========================================\n" << std::endl;
 
     // Finally, solve the system. The solver, being a gko::LinOp, can be
     // applied to a right hand side, b to obtain the solution, x.
