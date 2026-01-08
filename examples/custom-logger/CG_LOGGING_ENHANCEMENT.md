@@ -69,26 +69,36 @@ Iteration-level Summary:
 ...
 ```
 
-### 详细操作日志（新增功能）
+### 详细的逐步操作日志（新增功能）
 
 ```
 ========================================
-Detailed CG Iteration Operations:
+Detailed CG Iteration Step-by-Step:
 ========================================
 
 --- Iteration 0 ---
-           Operation |         Input Norm |        Output Norm
-----------------------------------------------------------------------
-   Precond (M*r->z) |   1.234567e-01 |   1.234567e-01
-     SpMV (A*p->q) |   1.234567e-01 |   2.345678e-01
+Step | Operation                      | Vector/Scalar             | Norm/Value
+--------------------------------------------------------------------------------------
+   1 | Precond: r -> z                | ||r|| (input)             | 1.234567e-01
+     |                                | ||z|| (output)            | 1.234567e-01
+   2 | Compute ρ = r†z                | √ρ (implicit residual)    | 1.234567e-01
+   3 | Update p = z + β*p             | ||p|| (for SpMV)          | 1.234567e-01
+   4 | SpMV: A*p -> q                 | ||q|| (output)            | 2.345678e-01
+   5 | Compute β = p†q                | β (scalar)                | (internal)
+   6 | Update x = x + α*p             | ||x|| (new solution)      | 5.678901e-01
+     | Update r = r - α*q             | ||r|| (new residual)      | 5.678901e-02
 
 --- Iteration 1 ---
-           Operation |         Input Norm |        Output Norm
-----------------------------------------------------------------------
-   Precond (M*r->z) |   5.678901e-02 |   5.678901e-02
-     SpMV (A*p->q) |   6.789012e-02 |   1.234567e-01
 ...
 ```
+
+每次迭代显示 CG 算法的完整步骤：
+1. **预条件化**：r → z，显示残差和预条件后的向量范数
+2. **计算 ρ**：内积 r†z，显示隐式残差范数
+3. **更新 p**：搜索方向更新，显示更新后的 p 的范数
+4. **矩阵向量乘**：A*p → q，显示结果向量 q 的范数
+5. **计算 β**：内积 p†q（标量值内部计算，不可直接观察）
+6. **更新解和残差**：显示新的解向量 x 和残差 r 的范数
 
 ## 使用方法
 

@@ -66,6 +66,13 @@ struct ResidualLogger : gko::log::Logger {
         RealValueType output_norm;
     };
 
+    // Struct to store vector norms at iteration completion
+    struct IterationVectorNorms {
+        RealValueType residual_norm;      // ||r|| after iteration
+        RealValueType solution_norm;      // ||x|| after iteration
+        RealValueType rho_sqrt;           // √ρ (implicit residual)
+    };
+
     // Output the logger's data in a table format
     void write() const
     {
@@ -101,38 +108,88 @@ struct ResidualLogger : gko::log::Logger {
         // Print detailed operation logs for CG iterations
         if (!operation_logs.empty()) {
             std::cout << "\n========================================" << std::endl;
-            std::cout << "Detailed CG Iteration Operations:" << std::endl;
+            std::cout << "Detailed CG Iteration Step-by-Step:" << std::endl;
             std::cout << "========================================" << std::endl;
 
             // Typically, each CG iteration has 2 operations: Precond and SpMV
-            // Due to the timing of iteration_complete callback, boundaries are
-            // marked between Precond and SpMV, so we use a fixed-size approach
             const std::size_t ops_per_iteration = 2;
 
             for (std::size_t iter = 0; iter < iterations.size(); iter++) {
-                std::size_t start_idx = iter * ops_per_iteration;
-                std::size_t end_idx = std::min(start_idx + ops_per_iteration,
-                                              operation_logs.size());
+                std::size_t precond_idx = iter * ops_per_iteration;
+                std::size_t spmv_idx = precond_idx + 1;
 
-                if (start_idx >= operation_logs.size()) break;
+                if (precond_idx >= operation_logs.size()) break;
 
                 // Print iteration header
                 std::cout << "\n--- Iteration " << iterations[iter] << " ---" << std::endl;
-                std::cout << std::setw(20) << "Operation" << " | "
-                          << std::setw(18) << "Input Norm" << " | "
-                          << std::setw(18) << "Output Norm" << std::endl;
-                std::cout << std::setfill('-') << std::setw(70) << ""
+                std::cout << std::setw(4) << "Step" << " | "
+                          << std::setw(30) << "Operation" << " | "
+                          << std::setw(25) << "Vector/Scalar" << " | "
+                          << std::setw(18) << "Norm/Value" << std::endl;
+                std::cout << std::setfill('-') << std::setw(90) << ""
                           << std::setfill(' ') << std::endl;
 
-                // Print operations for this iteration
-                for (std::size_t op_idx = start_idx; op_idx < end_idx; op_idx++) {
-                    const auto& log = operation_logs[op_idx];
-                    std::cout << std::scientific;
-                    std::cout << std::setw(20) << log.operation_type << " | "
-                              << std::setw(18) << log.input_norm << " | "
-                              << std::setw(18) << log.output_norm << std::endl;
-                    std::cout.unsetf(std::ios_base::floatfield);
+                std::cout << std::scientific;
+                int step_num = 1;
+
+                // Step 1: Preconditioner application (r -> z)
+                if (precond_idx < operation_logs.size()) {
+                    const auto& precond = operation_logs[precond_idx];
+                    std::cout << std::setw(4) << step_num++ << " | "
+                              << std::setw(30) << "Precond: r -> z" << " | "
+                              << std::setw(25) << "||r|| (input)" << " | "
+                              << std::setw(18) << precond.input_norm << std::endl;
+                    std::cout << std::setw(4) << "" << " | "
+                              << std::setw(30) << "" << " | "
+                              << std::setw(25) << "||z|| (output)" << " | "
+                              << std::setw(18) << precond.output_norm << std::endl;
                 }
+
+                // Step 2: Compute ρ = r†z (implicit residual norm squared)
+                if (iter < vector_norms.size()) {
+                    std::cout << std::setw(4) << step_num++ << " | "
+                              << std::setw(30) << "Compute ρ = r†z" << " | "
+                              << std::setw(25) << "√ρ (implicit residual)" << " | "
+                              << std::setw(18) << vector_norms[iter].rho_sqrt << std::endl;
+                }
+
+                // Step 3: Update search direction p
+                if (spmv_idx < operation_logs.size()) {
+                    const auto& spmv = operation_logs[spmv_idx];
+                    std::cout << std::setw(4) << step_num++ << " | "
+                              << std::setw(30) << "Update p = z + β*p" << " | "
+                              << std::setw(25) << "||p|| (for SpMV)" << " | "
+                              << std::setw(18) << spmv.input_norm << std::endl;
+                }
+
+                // Step 4: Matrix-vector product (p -> q)
+                if (spmv_idx < operation_logs.size()) {
+                    const auto& spmv = operation_logs[spmv_idx];
+                    std::cout << std::setw(4) << step_num++ << " | "
+                              << std::setw(30) << "SpMV: A*p -> q" << " | "
+                              << std::setw(25) << "||q|| (output)" << " | "
+                              << std::setw(18) << spmv.output_norm << std::endl;
+                }
+
+                // Step 5: Note about β computation (not directly observable)
+                std::cout << std::setw(4) << step_num++ << " | "
+                          << std::setw(30) << "Compute β = p†q" << " | "
+                          << std::setw(25) << "β (scalar)" << " | "
+                          << std::setw(18) << "(internal)" << std::endl;
+
+                // Step 6: Update solution and residual
+                if (iter < vector_norms.size()) {
+                    std::cout << std::setw(4) << step_num++ << " | "
+                              << std::setw(30) << "Update x = x + α*p" << " | "
+                              << std::setw(25) << "||x|| (new solution)" << " | "
+                              << std::setw(18) << vector_norms[iter].solution_norm << std::endl;
+                    std::cout << std::setw(4) << "" << " | "
+                              << std::setw(30) << "Update r = r - α*q" << " | "
+                              << std::setw(25) << "||r|| (new residual)" << " | "
+                              << std::setw(18) << vector_norms[iter].residual_norm << std::endl;
+                }
+
+                std::cout.unsetf(std::ios_base::floatfield);
             }
             std::cout << std::endl;
         }
@@ -161,6 +218,35 @@ struct ResidualLogger : gko::log::Logger {
 
         // Mark the boundary for this iteration's operations
         iteration_boundaries.push_back(operation_logs.size());
+
+        // Collect vector norms for detailed step-by-step output
+        IterationVectorNorms norms;
+
+        // Get residual norm
+        if (residual) {
+            auto dense_residual = gko::as<gko_dense>(residual);
+            norms.residual_norm = compute_norm(dense_residual);
+        } else {
+            norms.residual_norm = -1.0;
+        }
+
+        // Get solution norm
+        if (solution) {
+            auto dense_solution = gko::as<gko_dense>(solution);
+            norms.solution_norm = compute_norm(dense_solution);
+        } else {
+            norms.solution_norm = -1.0;
+        }
+
+        // Get implicit residual norm (√ρ)
+        if (implicit_sq_residual_norm) {
+            auto dense_norm = gko::as<gko_real_dense>(implicit_sq_residual_norm);
+            norms.rho_sqrt = std::sqrt(get_first_element(dense_norm));
+        } else {
+            norms.rho_sqrt = -1.0;
+        }
+
+        vector_norms.push_back(norms);
 
         // If the solver shares a residual norm, log its value
         if (residual_norm) {
@@ -287,6 +373,7 @@ private:
     // Detailed operation logs for CG iterations
     mutable std::vector<OperationLog> operation_logs{};
     mutable std::vector<std::size_t> iteration_boundaries{};
+    mutable std::vector<IterationVectorNorms> vector_norms{};
 
     // References for operation identification
     const gko::LinOp* system_matrix_{nullptr};
