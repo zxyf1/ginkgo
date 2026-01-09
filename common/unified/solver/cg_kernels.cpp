@@ -99,27 +99,38 @@ void step_2(std::shared_ptr<const DefaultExecutor> exec,
             if (!stop[col].has_stopped()) {
                 auto tmp = safe_divide(rho[col], beta[col]);
 
-                // Print debug info for first column and first 3 rows
-                if (col == 0 && row < 3) {
-                    printf("step_2 Debug [row=%d, col=%d]:\n", static_cast<int>(row), static_cast<int>(col));
+                // Print "before" state - only first thread (row=0) of first column prints all rows
+                if (col == 0 && row == 0) {
+                    printf("\n=== step_2 Debug (CUDA/Unified) [col=%d] ===\n", static_cast<int>(col));
                     printf("  rho[col] = %.10e\n", static_cast<double>(real(rho[col])));
                     printf("  beta[col] = %.10e\n", static_cast<double>(real(beta[col])));
-                    printf("  alpha (tmp) = rho/beta = %.10e\n", static_cast<double>(real(tmp)));
-                    printf("  Before update:\n");
-                    printf("    x(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(x(row, col))));
-                    printf("    p(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(p(row, col))));
-                    printf("    r(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(r(row, col))));
-                    printf("    q(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(q(row, col))));
+                    printf("  alpha = rho/beta = %.10e\n", static_cast<double>(real(tmp)));
+                    printf("\n  Before update (first 3 rows):\n");
+                    for (int i = 0; i < 3; i++) {
+                        printf("    [row=%d] x=%.10e, p=%.10e, r=%.10e, q=%.10e\n",
+                               i,
+                               static_cast<double>(real(x(i, col))),
+                               static_cast<double>(real(p(i, col))),
+                               static_cast<double>(real(r(i, col))),
+                               static_cast<double>(real(q(i, col))));
+                    }
                 }
 
+                // All threads perform the update
                 x(row, col) += tmp * p(row, col);
                 r(row, col) -= tmp * q(row, col);
 
-                // Print after update
-                if (col == 0 && row < 3) {
-                    printf("  After update:\n");
-                    printf("    x(%d,%d) = %.10e (new)\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(x(row, col))));
-                    printf("    r(%d,%d) = %.10e (new)\n\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(r(row, col))));
+                // Print "after" state - let the last thread (row=2) print to ensure other threads complete
+                // Note: This is not perfectly synchronized but works in practice for small matrices
+                if (col == 0 && row == 2) {
+                    printf("\n  After update (first 3 rows):\n");
+                    for (int i = 0; i < 3; i++) {
+                        printf("    [row=%d] x=%.10e (new), r=%.10e (new)\n",
+                               i,
+                               static_cast<double>(real(x(i, col))),
+                               static_cast<double>(real(r(i, col))));
+                    }
+                    printf("=== End step_2 ===\n\n");
                 }
             }
         },
