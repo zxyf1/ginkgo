@@ -98,8 +98,29 @@ void step_2(std::shared_ptr<const DefaultExecutor> exec,
                       auto beta, auto rho, auto stop) {
             if (!stop[col].has_stopped()) {
                 auto tmp = safe_divide(rho[col], beta[col]);
+
+                // Print debug info for first column and first 3 rows
+                if (col == 0 && row < 3) {
+                    printf("step_2 Debug [row=%d, col=%d]:\n", static_cast<int>(row), static_cast<int>(col));
+                    printf("  rho[col] = %.10e\n", static_cast<double>(real(rho[col])));
+                    printf("  beta[col] = %.10e\n", static_cast<double>(real(beta[col])));
+                    printf("  alpha (tmp) = rho/beta = %.10e\n", static_cast<double>(real(tmp)));
+                    printf("  Before update:\n");
+                    printf("    x(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(x(row, col))));
+                    printf("    p(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(p(row, col))));
+                    printf("    r(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(r(row, col))));
+                    printf("    q(%d,%d) = %.10e\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(q(row, col))));
+                }
+
                 x(row, col) += tmp * p(row, col);
                 r(row, col) -= tmp * q(row, col);
+
+                // Print after update
+                if (col == 0 && row < 3) {
+                    printf("  After update:\n");
+                    printf("    x(%d,%d) = %.10e (new)\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(x(row, col))));
+                    printf("    r(%d,%d) = %.10e (new)\n\n", static_cast<int>(row), static_cast<int>(col), static_cast<double>(real(r(row, col))));
+                }
             }
         },
         x->get_size(), r->get_stride(), x, default_stride(r), default_stride(p),

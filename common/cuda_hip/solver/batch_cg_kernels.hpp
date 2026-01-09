@@ -101,7 +101,8 @@ __device__ __forceinline__ void update_x_and_r(
     Group subgroup, const int num_rows, const ValueType& rho_old_shared_entry,
     const ValueType* const p_shared_entry,
     const ValueType* const Ap_shared_entry, ValueType& alpha_shared_entry,
-    ValueType* const x_shared_entry, ValueType* const r_shared_entry)
+    ValueType* const x_shared_entry, ValueType* const r_shared_entry,
+    const int batch_id = -1, const int iter = -1)
 {
     if (threadIdx.x / config::warp_size == 0) {
         single_rhs_compute_conj_dot(subgroup, num_rows, p_shared_entry,
@@ -109,10 +110,40 @@ __device__ __forceinline__ void update_x_and_r(
     }
     __syncthreads();
 
+    // Print debug info only for first batch and first thread
+    if (threadIdx.x == 0 && batch_id == 0) {
+        const ValueType alpha = rho_old_shared_entry / alpha_shared_entry;
+        printf("\n=== update_x_and_r Debug (batch=%d, iter=%d) ===\n", batch_id, iter);
+        printf("  rho_old = %.10e\n", static_cast<double>(real(rho_old_shared_entry)));
+        printf("  alpha_shared (p'*Ap) = %.10e\n", static_cast<double>(real(alpha_shared_entry)));
+        printf("  alpha = rho_old/(p'*Ap) = %.10e\n", static_cast<double>(real(alpha)));
+        printf("  Before update (first 3 elements):\n");
+        for (int i = 0; i < min(3, num_rows); i++) {
+            printf("    x[%d] = %.10e, p[%d] = %.10e\n",
+                   i, static_cast<double>(real(x_shared_entry[i])),
+                   i, static_cast<double>(real(p_shared_entry[i])));
+            printf("    r[%d] = %.10e, Ap[%d] = %.10e\n",
+                   i, static_cast<double>(real(r_shared_entry[i])),
+                   i, static_cast<double>(real(Ap_shared_entry[i])));
+        }
+    }
+    __syncthreads();
+
     for (int li = threadIdx.x; li < num_rows; li += blockDim.x) {
         const ValueType alpha = rho_old_shared_entry / alpha_shared_entry;
         x_shared_entry[li] += alpha * p_shared_entry[li];
         r_shared_entry[li] -= alpha * Ap_shared_entry[li];
+    }
+    __syncthreads();
+
+    // Print results after update
+    if (threadIdx.x == 0 && batch_id == 0) {
+        printf("  After update (first 3 elements):\n");
+        for (int i = 0; i < min(3, num_rows); i++) {
+            printf("    x[%d] = %.10e\n", i, static_cast<double>(real(x_shared_entry[i])));
+            printf("    r[%d] = %.10e\n", i, static_cast<double>(real(r_shared_entry[i])));
+        }
+        printf("=== End update_x_and_r ===\n\n");
     }
 }
 
@@ -228,7 +259,7 @@ __global__ void __launch_bounds__(max_cg_threads)
             // x = x + alpha * p
             // r = r - alpha * Ap
             update_x_and_r(subgroup, num_rows, rho_old_sh[0], p_sh, Ap_sh,
-                           alpha_sh[0], x_sh, r_sh);
+                           alpha_sh[0], x_sh, r_sh, batch_id, iter);
             __syncthreads();
 
             // z = precond * r
