@@ -4,6 +4,9 @@
 
 #include "core/solver/cg_kernels.hpp"
 
+#include <iomanip>
+#include <iostream>
+
 #include <ginkgo/core/base/array.hpp>
 #include <ginkgo/core/base/exception_helpers.hpp>
 #include <ginkgo/core/base/math.hpp>
@@ -86,8 +89,38 @@ void step_2(std::shared_ptr<const ReferenceExecutor> exec,
             }
             if (is_nonzero(beta->at(j))) {
                 auto tmp = rho->at(j) / beta->at(j);
+
+                // Print debug info for first column and first 3 rows
+                if (j == 0 && i < 3) {
+                    std::cout << "step_2 Debug (Reference) [row=" << i << ", col=" << j << "]:" << std::endl;
+                    std::cout << "  rho[col] = " << std::scientific << std::setprecision(10)
+                              << real(rho->at(j)) << std::endl;
+                    std::cout << "  beta[col] = " << std::scientific << std::setprecision(10)
+                              << real(beta->at(j)) << std::endl;
+                    std::cout << "  alpha (tmp) = rho/beta = " << std::scientific << std::setprecision(10)
+                              << real(tmp) << std::endl;
+                    std::cout << "  Before update:" << std::endl;
+                    std::cout << "    x(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(x->at(i, j)) << std::endl;
+                    std::cout << "    p(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(p->at(i, j)) << std::endl;
+                    std::cout << "    r(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(r->at(i, j)) << std::endl;
+                    std::cout << "    q(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(q->at(i, j)) << std::endl;
+                }
+
                 x->at(i, j) += tmp * p->at(i, j);
                 r->at(i, j) -= tmp * q->at(i, j);
+
+                // Print after update
+                if (j == 0 && i < 3) {
+                    std::cout << "  After update:" << std::endl;
+                    std::cout << "    x(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(x->at(i, j)) << " (new)" << std::endl;
+                    std::cout << "    r(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
+                              << real(r->at(i, j)) << " (new)" << std::endl << std::endl;
+                }
             }
         }
     }
