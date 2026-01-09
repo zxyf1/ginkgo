@@ -90,36 +90,36 @@ void step_2(std::shared_ptr<const ReferenceExecutor> exec,
             if (is_nonzero(beta->at(j))) {
                 auto tmp = rho->at(j) / beta->at(j);
 
-                // Print debug info for first column and first 3 rows
-                if (j == 0 && i < 3) {
-                    std::cout << "step_2 Debug (Reference) [row=" << i << ", col=" << j << "]:" << std::endl;
+                // Print "before" state - only first row (i=0) of first column prints all rows
+                if (j == 0 && i == 0) {
+                    std::cout << "\n=== step_2 Debug (Reference) [col=" << j << "] ===" << std::endl;
                     std::cout << "  rho[col] = " << std::scientific << std::setprecision(10)
                               << real(rho->at(j)) << std::endl;
                     std::cout << "  beta[col] = " << std::scientific << std::setprecision(10)
                               << real(beta->at(j)) << std::endl;
-                    std::cout << "  alpha (tmp) = rho/beta = " << std::scientific << std::setprecision(10)
+                    std::cout << "  alpha = rho/beta = " << std::scientific << std::setprecision(10)
                               << real(tmp) << std::endl;
-                    std::cout << "  Before update:" << std::endl;
-                    std::cout << "    x(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(x->at(i, j)) << std::endl;
-                    std::cout << "    p(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(p->at(i, j)) << std::endl;
-                    std::cout << "    r(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(r->at(i, j)) << std::endl;
-                    std::cout << "    q(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(q->at(i, j)) << std::endl;
+                    std::cout << "\n  Before update (first 3 rows):" << std::endl;
+                    for (size_type k = 0; k < 3 && k < x->get_size()[0]; k++) {
+                        std::cout << "    [row=" << k << "] x=" << std::scientific << std::setprecision(10)
+                                  << real(x->at(k, j)) << ", p=" << real(p->at(k, j))
+                                  << ", r=" << real(r->at(k, j)) << ", q=" << real(q->at(k, j))
+                                  << std::endl;
+                    }
                 }
 
                 x->at(i, j) += tmp * p->at(i, j);
                 r->at(i, j) -= tmp * q->at(i, j);
 
-                // Print after update
-                if (j == 0 && i < 3) {
-                    std::cout << "  After update:" << std::endl;
-                    std::cout << "    x(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(x->at(i, j)) << " (new)" << std::endl;
-                    std::cout << "    r(" << i << "," << j << ") = " << std::scientific << std::setprecision(10)
-                              << real(r->at(i, j)) << " (new)" << std::endl << std::endl;
+                // Print "after" state - only third row (i=2) of first column prints all rows
+                if (j == 0 && i == 2) {
+                    std::cout << "\n  After update (first 3 rows):" << std::endl;
+                    for (size_type k = 0; k < 3 && k < x->get_size()[0]; k++) {
+                        std::cout << "    [row=" << k << "] x=" << std::scientific << std::setprecision(10)
+                                  << real(x->at(k, j)) << " (new), r=" << real(r->at(k, j))
+                                  << " (new)" << std::endl;
+                    }
+                    std::cout << "=== End step_2 ===\n" << std::endl;
                 }
             }
         }
